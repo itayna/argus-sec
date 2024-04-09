@@ -1,0 +1,49 @@
+name: Task IaC Setup
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  setup-infrastructure:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+    - name: Terraform Init
+      run: terraform init
+      working-directory: terraform
+    - name: Terraform Apply
+      id: terraform
+      run: terraform apply -auto-approve
+      working-directory: terraform
+    - name: Get ECR repository URI
+      run: echo "ECR_REPOSITORY_URI=${{ steps.terraform.outputs.ecr_repository_uri }}" >> $GITHUB_OUTPUT
+    - name: Get S3 bucket name
+      run: echo "S3_BUCKET_NAME=${{ steps.terraform.outputs.s3_bucket_name }}" >> $GITHUB_OUTPUT
+    - name: Get EC2 key pair name
+      run: echo "EC2_KEY_PAIR_NAME=${{ steps.terraform.outputs.ec2_key_pair_name }}" >> $GITHUB_OUTPUT
+    - name: Run Jenkins on EC2
+      run: |
+        # SSH into the EC2 instance
+        ssh -i ${{ env.EC2_KEY_PAIR_NAME }} ec2-user@${{ steps.terraform.outputs.ec2_instance_public_ip }} << EOF
+        # Install Docker
+        sudo yum update -y
+        sudo amazon-linux-extras install docker
+        sudo systemctl start docker
+        sudo systemctl enable docker
+        
+        # Run the Jenkins Docker container
+        sudo docker run -d -p 8080:8080 -v /var/jenkins_home:/var/jenkins_home -v /var/run/docker.sock:/var/run/docker.sock 161192472568.dkr.ecr.us-east-1.amazonaws.com/jenkins-controller:latest
+        EOF
