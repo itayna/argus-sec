@@ -1,0 +1,61 @@
+pipeline {
+    agent { label 'controller' }
+    stages {
+        stage('Build & Deploy') {
+            when {
+                anyOf {
+                    changelog '.*'
+                    triggeredBy 'UserIdCause'
+                }
+            }
+            steps {
+                script {
+                    // Checkout the Git repository
+                    checkout scm
+
+                    // Build the Docker image
+                    docker.build("${ env.ECR_REPOSITORY_URI }:latest", "src").push()
+
+                    // Run the Python script
+                    docker.image("${ env.ECR_REPOSITORY_URI }:latest").run() {
+                        sh "python src/script.py"
+                    }
+
+                    // Upload the artifact to S3
+                    s3Upload(file: 'artifact.txt', bucket: '${ env.S3_BUCKET_NAME }', acl: 'PublicRead')
+
+                    // Upload the Docker image to ECR
+                    docker.withRegistry("https://${ env.ECR_REPOSITORY_URI }", 'ecr:us-east-1:ecr-credentials') {
+                        docker.image("${ env.ECR_REPOSITORY_URI }:latest").push()
+                    }
+                }
+            }
+        }
+        stage('Pull & Test') {
+            when {
+                anyOf {
+                    cron '0 17 * * *'
+                    triggeredBy 'UserIdCause'
+                }
+            }
+            steps {
+                script {
+                    // Download the artifact from S3
+                    s3Download(file: 'artifact.txt', bucket: '${ env.S3_BUCKET_NAME }', force: true)
+
+                    // Download the Docker image from ECR
+                    docker.withRegistry("https://${ env.ECR_REPOSITORY_URI }", 'ecr:us-east-1:ecr-credentials') {
+                        docker.image("${ env.ECR_REPOSITORY_URI }:latest").pull()
+                    }
+
+                    // Run a simple test on the artifact
+                    if (fileEmpty('artifact.txt')) {
+                        error('Artifact is empty')
+                    } else {
+                        echo 'Artifact is not empty'
+                    }
+                }
+            }
+        }
+    }
+}
