@@ -91,11 +91,40 @@ resource "aws_ecr_repository" "argus_sec_ecr" {
   name = "ecr-argus-sec-useast1-01"
 }
 
+# Create IAM role for EC2 instance
+resource "aws_iam_role" "jenkins" {
+  name = "jenkins-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach IAM policies to the role
+resource "aws_iam_role_policy_attachment" "jenkins_ssm" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  role       = aws_iam_role.jenkins.name
+}
+
+# Create IAM instance profile
+resource "aws_iam_instance_profile" "jenkins" {
+  name = "jenkins-instance-profile"
+  role = aws_iam_role.jenkins.name
+}
+
 # Create EC2 instance
 resource "aws_instance" "jenkins" {
   ami           = "ami-051f8a213df8bc089" # Latest Amazon Linux 2 AMI
   instance_type = "t2.micro"
-  key_name      = var.ec2_key_pair_name
 
   vpc_security_group_ids = [
     aws_security_group.jenkins_sg.id,
@@ -105,10 +134,7 @@ resource "aws_instance" "jenkins" {
 
   associate_public_ip_address = true
 
-  root_block_device {
-    volume_size = var.ec2_root_volume_size
-    volume_type = "gp3"
-  }
+  iam_instance_profile = aws_iam_instance_profile.jenkins.name
 
   user_data = <<-EOF
              #!/bin/bash
@@ -122,6 +148,4 @@ resource "aws_instance" "jenkins" {
   tags = {
     Name = "ec2-argus-sec-useast1-01"
   }
-
-  count = var.ec2_instance_count
 }
