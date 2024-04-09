@@ -1,58 +1,71 @@
 pipeline {
-    agent { label 'controller' }
+    agent any
+    
+    parameters {
+        booleanParam(name: 'MANUAL_TRIGGER', defaultValue: false, description: 'Trigger the build manually')
+    }
+    
+    triggers {
+        pollSCM('H/5 * * * *') // Poll SCM every 5 minutes for changes
+        cron('H 0 * * *') // Run the Pull & Test stage every hour
+    }
+    
     stages {
         stage('Build & Deploy') {
             when {
                 anyOf {
-                    changelog '.*'
-                    triggeredBy 'UserIdCause'
+                    changeRequest target: 'main' // Trigger on pull request to the main branch
+                    expression { params.MANUAL_TRIGGER == true } // Trigger manually from Jenkins UI
                 }
             }
             steps {
                 script {
-                    // Checkout the Git repository
+                    // Clone the Git repository and checkout the relevant PR branch
                     checkout scm
-
+                    
                     // Build the Docker image
-                    docker.build("${ env.ECR_REPOSITORY_URI }:latest", "src").push()
-
-                    // Run the Python script
-                    docker.image("${ env.ECR_REPOSITORY_URI }:latest").run() {
-                        sh "python src/script.py"
+                    def dockerImage = docker.build("your-ecr-repo/python-script:${env.BUILD_NUMBER}")
+                    
+                    // Run the Python script inside the Docker container
+                    dockerImage.inside {
+                        sh 'python task.py'
                     }
-
-                    // Upload the artifact to S3
-                    s3Upload(file: 'artifact.txt', bucket: '${ env.S3_BUCKET_NAME }', acl: 'PublicRead')
-
-                    // Upload the Docker image to ECR
-                    docker.withRegistry("https://${ env.ECR_REPOSITORY_URI }", 'ecr:us-east-1:ecr-credentials') {
-                        docker.image("${ env.ECR_REPOSITORY_URI }:latest").push()
+                    
+                    // Deploy the artifact to S3
+                    withAWS(credentials: 'your-aws-credentials', region: 'us-east-1') {
+                        s3Upload(file: 'artifact-latest.txt', bucket: 'your-s3-bucket', path: 'artifacts/')
+                    }
+                    
+                    // Deploy the Docker image to ECR
+                    docker.withRegistry('https://your-ecr-repo.amazonaws.com', 'ecr:us-east-1:your-ecr-credentials') {
+                        dockerImage.push("${env.BUILD_NUMBER}")
+                        dockerImage.push("latest")
                     }
                 }
             }
         }
+        
         stage('Pull & Test') {
             when {
                 anyOf {
-                    cron '0 17 * * *'
-                    triggeredBy 'UserIdCause'
+                    triggeredBy 'TimerTrigger' // Trigger periodically based on the cron schedule
+                    expression { params.MANUAL_TRIGGER == true } // Trigger manually from Jenkins UI
                 }
             }
             steps {
                 script {
-                    // Download the artifact from S3
-                    s3Download(file: 'artifact.txt', bucket: '${ env.S3_BUCKET_NAME }', force: true)
-
-                    // Download the Docker image from ECR
-                    docker.withRegistry("https://${ env.ECR_REPOSITORY_URI }", 'ecr:us-east-1:ecr-credentials') {
-                        docker.image("${ env.ECR_REPOSITORY_URI }:latest").pull()
+                    // Download the most recent artifact from S3
+                    withAWS(credentials: 'your-aws-credentials', region: 'us-east-1') {
+                        s3Download(file: 'artifact-latest.txt', bucket: 'your-s3-bucket', path: 'artifacts/artifact-latest.txt', force: true)
                     }
-
-                    // Run a simple test on the artifact
-                    if (fileEmpty('artifact.txt')) {
-                        error('Artifact is empty')
+                    
+                    // Test whether the artifact is empty
+                    def artifactContent = readFile('artifact-latest.txt').trim()
+                    if (artifactContent.isEmpty()) {
+                        echo 'Artifact is empty'
                     } else {
                         echo 'Artifact is not empty'
+                        echo "Artifact content:\n${artifactContent}"
                     }
                 }
             }
