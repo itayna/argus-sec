@@ -1,3 +1,6 @@
 scripts/artifact*.txt
 terraform/terraform*
 terraform/.terraform*
+terraform/*
+jenkins/JenkinsfileOLD
+.github/

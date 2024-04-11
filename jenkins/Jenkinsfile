@@ -1,74 +1,81 @@
 pipeline {
+
     agent any
     
     parameters {
-        booleanParam(name: 'MANUAL_TRIGGER', defaultValue: false, description: 'Trigger the build manually')
+        choice(name: 'STAGE', choices: ['Build & Deploy', 'Pull & Test', 'Manually'], description: 'Select the stage to run')
+        // booleanParam(name: 'MANUAL_TRIGGER', defaultValue: false, description: 'Trigger the build manually')
     }
     
     triggers {
         pollSCM('H/5 * * * *') // Poll SCM every 5 minutes for changes
-        cron('H 0 * * *') // Run the Pull & Test stage every hour
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        S3_BUCKET = 'itaynave-task-s3'
+        ECR_REPOSITORY = '161192472568.dkr.ecr.us-east-1.amazonaws.com/itaynave-task-ecr'
+        AWS_ACCESS_KEY_ID = credentials('aws-access-key-id')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key-id')
     }
     
     stages {
         stage('Build & Deploy') {
             when {
                 anyOf {
-                    changeRequest target: 'main' // Trigger on pull request to the main branch
-                    expression { params.MANUAL_TRIGGER == true } // Trigger manually from Jenkins UI
+                    changeRequest()
+                    expression { params.STAGE == 'Build & Deploy' }
+                    expression { params.STAGE == 'Manually' } 
                 }
             }
             steps {
+                checkout scm
                 script {
-                    // Clone the Git repository and checkout the relevant PR branch
-                    checkout scm
+                    sh 'sudo chmod 666 /var/run/docker.sock'
+                    dir('scripts') {
+                        sh 'mkdir -p artifacts'  // Create the artifacts directory if it doesn't exist
+                        sh 'docker build -t ${ECR_REPOSITORY}:latest .'
+                        sh 'docker run --rm -v ${PWD}/artifacts:/artifacts ${ECR_REPOSITORY}:latest'
+
+                        withAWS(region: "${AWS_REGION}", credentials: 'candidate-iam') {
+                            // Authenticate with ECR
+                            sh 'aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin 161192472568.dkr.ecr.us-east-1.amazonaws.com'
                     
-                    // Build the Docker image
-                    def dockerImage = docker.build("your-ecr-repo/python-script:${env.BUILD_NUMBER}")
+                            // Push the Docker image to ECR
+                            sh 'docker push ${ECR_REPOSITORY}:latest'
                     
-                    // Run the Python script inside the Docker container
-                    dockerImage.inside {
-                        sh 'python task.py'
-                    }
-                    
-                    // Deploy the artifact to S3
-                    withAWS(credentials: 'your-aws-credentials', region: 'us-east-1') {
-                        s3Upload(file: 'artifact-latest.txt', bucket: 'your-s3-bucket', path: 'artifacts/')
-                    }
-                    
-                    // Deploy the Docker image to ECR
-                    docker.withRegistry('https://your-ecr-repo.amazonaws.com', 'ecr:us-east-1:your-ecr-credentials') {
-                        dockerImage.push("${env.BUILD_NUMBER}")
-                        dockerImage.push("latest")
+                            // Upload the artifact to S3
+                            s3Upload(bucket: "${S3_BUCKET}", file: 'artifacts/artifact-latest.txt')
+                        }
                     }
                 }
             }
         }
-        
         stage('Pull & Test') {
             when {
                 anyOf {
-                    triggeredBy 'TimerTrigger' // Trigger periodically based on the cron schedule
-                    expression { params.MANUAL_TRIGGER == true } // Trigger manually from Jenkins UI
+                    expression { params.STAGE == 'Pull & Test' }
+                    expression { params.STAGE == 'Manually' }
                 }
             }
             steps {
-                script {
-                    // Download the most recent artifact from S3
-                    withAWS(credentials: 'your-aws-credentials', region: 'us-east-1') {
-                        s3Download(file: 'artifact-latest.txt', bucket: 'your-s3-bucket', path: 'artifacts/artifact-latest.txt', force: true)
+                withAWS(region: "${AWS_REGION}", credentials: 'candidate-iam') {
+                    // Download the specific artifact file from S3
+                    s3Download(bucket: "${S3_BUCKET}", file: 'artifact-latest.txt', path: 'artifact-latest.txt', force: true)
+            
+                    // Check if the artifact is empty
+                    script {
+                        def artifactContent = readFile('artifact-latest.txt').trim()
+                        if (artifactContent.isEmpty()) {
+                            error('Artifact is empty')
+                        } else {
+                            echo 'Artifact is not empty'
+                        }
                     }
-                    
-                    // Test whether the artifact is empty
-                    def artifactContent = readFile('artifact-latest.txt').trim()
-                    if (artifactContent.isEmpty()) {
-                        echo 'Artifact is empty'
-                    } else {
-                        echo 'Artifact is not empty'
-                        echo "Artifact content:\n${artifactContent}"
-                    }
-                }
+                }   
             }
         }
     }
+
+
 }
